@@ -124,3 +124,86 @@ def test_qpe_of_gqsp():
     hubbard_time_evolution_by_gqsp = HamiltonianSimulationByGQSP(walk_op, t=5, precision=1e-7)
     textbook_qpe_w_gqsp = TextbookQPE(hubbard_time_evolution_by_gqsp, RectangularWindowState(3))
     qlt_testing.assert_valid_bloq_decomposition(textbook_qpe_w_gqsp)
+
+
+def test_textbook_qpe_minimal_reproducer_issue_1861():
+    import attrs
+    from qualtran import Bloq, BloqBuilder, QBit, Register, Signature, SoquetT
+
+    @attrs.frozen
+    class SimpleUnitary(Bloq):
+        n_qubits: int = 2
+
+        @property
+        def signature(self) -> Signature:
+            return Signature([Register('q', QBit(), shape=(self.n_qubits,))])
+
+        def build_composite_bloq(self, bb: BloqBuilder, q: SoquetT):
+            return {'q': q}
+
+    unitary = SimpleUnitary(n_qubits=2)
+    qpe = TextbookQPE(unitary, RectangularWindowState(3))
+    qlt_testing.assert_valid_bloq_decomposition(qpe)
+    matrix = qpe.tensor_contract()
+    assert matrix.shape == (32, 4)
+
+
+def test_textbook_qpe_build_composite_bloq_matches_cirq():
+    theta = 0.234
+    unitary = ZPowGate(exponent=2 * theta)
+    state_prep = RectangularWindowState(3)
+    qpe = TextbookQPE(unitary, state_prep)
+    qlt_testing.assert_valid_bloq_decomposition(qpe)
+
+    gh = GateHelper(qpe)
+    circuit = cirq.Circuit(cirq.X(*gh.quregs['q']), cirq.decompose_once(gh.operation))
+    sim_theta = simulate_theta_estimate(circuit, gh.quregs['qpe_reg'])
+
+    mat = qpe.tensor_contract()
+    state = mat[:, 1]
+    probs = np.abs(state) ** 2
+    tensor_theta = (np.argmax(probs) // 2) / 8
+    assert sim_theta == tensor_theta
+
+
+def test_textbook_qpe_with_power():
+    from qualtran.bloqs.basic_gates import Power, XGate
+
+    unitary = Power(XGate(), 2)
+    qpe = TextbookQPE(unitary, RectangularWindowState(3))
+    qlt_testing.assert_valid_bloq_decomposition(qpe)
+    matrix = qpe.tensor_contract()
+    assert matrix.shape == (16, 2)
+
+
+def test_textbook_qpe_with_lp_resource_state():
+    unitary = ZPowGate(exponent=2 * 0.234)
+    qpe = TextbookQPE(unitary, LPResourceState(3))
+    qlt_testing.assert_valid_bloq_decomposition(qpe)
+    matrix = qpe.tensor_contract()
+    assert matrix.shape == (16, 2)
+
+
+def test_textbook_qpe_invalid_registers():
+    from qualtran import Bloq, Register, Side, Signature, QBit
+    import attrs
+
+    @attrs.frozen
+    class NonThruBloq(Bloq):
+        @property
+        def signature(self) -> Signature:
+            return Signature([Register('q', QBit(), side=Side.RIGHT)])
+
+    with pytest.raises(ValueError, match="only THRU registers"):
+        _ = TextbookQPE(NonThruBloq(), RectangularWindowState(3))
+
+
+def test_textbook_qpe_symbolic_m_bits_decompose_raises():
+    import sympy
+    from qualtran import DecomposeTypeError
+
+    theta = sympy.Symbol('theta')
+    m_bits = sympy.Symbol('m')
+    qpe = TextbookQPE(ZPowGate(exponent=2 * theta), RectangularWindowState(m_bits))
+    with pytest.raises(DecomposeTypeError, match="Cannot decompose .* with symbolic m_bits"):
+        _ = qpe.decompose_bloq()

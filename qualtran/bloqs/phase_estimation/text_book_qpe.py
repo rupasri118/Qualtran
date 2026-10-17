@@ -12,18 +12,46 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 from functools import cached_property
-from typing import Iterator, Tuple, TYPE_CHECKING
+from typing import Dict, Iterator, Tuple, TYPE_CHECKING
 
 import attrs
 import cirq
+import numpy as np
 
-from qualtran import Bloq, bloq_example, BloqDocSpec, GateWithRegisters, Register, Signature
+from qualtran import (
+    Bloq,
+    bloq_example,
+    BloqDocSpec,
+    CtrlSpec,
+    DecomposeTypeError,
+    GateWithRegisters,
+    Register,
+    Side,
+    Signature,
+)
+from qualtran.bloqs.basic_gates import Power
+from qualtran.bloqs.bookkeeping import Join, Split
 from qualtran.bloqs.phase_estimation.qpe_window_state import QPEWindowStateBase
 from qualtran.bloqs.qft.qft_text_book import QFTTextBook
 from qualtran.symbolics import is_symbolic, SymbolicInt
 
 if TYPE_CHECKING:
+    from qualtran import BloqBuilder, SoquetT
     from qualtran.resource_counting import BloqCountDictT, SympySymbolAllocator
+
+
+def _power_bloq(bloq: Bloq, power: int) -> Bloq:
+    if power == 1:
+        return bloq
+    pow_method = getattr(bloq, '__pow__', None)
+    if callable(pow_method):
+        try:
+            res = pow_method(power)
+            if res is not NotImplemented and isinstance(res, Bloq):
+                return res
+        except (TypeError, NotImplementedError):
+            pass
+    return Power(bloq, power)
 
 
 @attrs.frozen
@@ -151,6 +179,10 @@ class TextbookQPE(GateWithRegisters):
 
     def __attrs_post_init__(self):
         assert is_symbolic(self.m_bits) or (self.qft_inv.signature.n_qubits() == self.m_bits)
+        if any(reg.side != Side.THRU for reg in self.unitary.signature):
+            raise ValueError(
+                f"self.unitary must have only THRU registers, found {self.unitary.signature}"
+            )
 
     @cached_property
     def m_bits(self) -> SymbolicInt:
@@ -168,16 +200,37 @@ class TextbookQPE(GateWithRegisters):
     def signature(self) -> Signature:
         return Signature([*self.phase_registers, *self.target_registers])
 
+    def build_composite_bloq(self, bb: 'BloqBuilder', **soqs: 'SoquetT') -> Dict[str, 'SoquetT']:
+        if is_symbolic(self.m_bits):
+            raise DecomposeTypeError(f"Cannot decompose {self} with symbolic m_bits")
+
+        qpe_reg = bb.add(self.ctrl_state_prep)
+        qpe_bits = list(bb.add(Split(self.ctrl_state_prep.m_qdtype), reg=qpe_reg))
+
+        target_reg_names = [reg.name for reg in self.target_registers]
+        for i in range(int(self.m_bits)):
+            u_pow = _power_bloq(self.unitary, 2**i)
+            cb, adder = u_pow.get_ctrl_system(CtrlSpec())
+            ctrl_out, target_out = adder(bb, [qpe_bits[-(i + 1)]], soqs)
+            (ctrl_bit,) = ctrl_out
+            qpe_bits[-(i + 1)] = ctrl_bit
+            soqs = dict(zip(target_reg_names, target_out))
+
+        qpe_joined = bb.add(Join(self.ctrl_state_prep.m_qdtype), reg=np.array(qpe_bits))
+        (qft_reg_name,) = [r.name for r in self.qft_inv.signature]
+        qpe_out = bb.add(self.qft_inv, **{qft_reg_name: qpe_joined})
+        return {'qpe_reg': qpe_out, **soqs}
+
     def decompose_from_registers(
         self, context: cirq.DecompositionContext, **quregs
     ) -> Iterator[cirq.OP_TREE]:
         target_quregs = {reg.name: quregs[reg.name] for reg in self.target_registers}
-        unitary_op = self.unitary.on_registers(**target_quregs)
         phase_qubits = quregs['qpe_reg']
 
         yield self.ctrl_state_prep.on(*phase_qubits)
         for i, qbit in enumerate(phase_qubits[::-1]):
-            yield cirq.pow(unitary_op.controlled_by(qbit), 2**i)
+            u_pow = _power_bloq(self.unitary, 2**i)
+            yield u_pow.on_registers(**target_quregs).controlled_by(qbit)
         yield self.qft_inv.on(*phase_qubits)
 
     def build_call_graph(self, ssa: 'SympySymbolAllocator') -> 'BloqCountDictT':

@@ -79,7 +79,10 @@ class BloqAsCirqGate(cirq.Gate):
     """
 
     def __init__(self, bloq: Bloq):
-        assert not isinstance(bloq, cirq.Gate)
+        if isinstance(bloq, cirq.Gate):
+            raise ValueError(
+                f"bloq {bloq} is already a cirq.Gate, no need to wrap in BloqAsCirqGate."
+            )
         for _, regs in bloq.signature.groups():
             if len(regs) > 1:
                 raise ValueError(
@@ -118,7 +121,8 @@ class BloqAsCirqGate(cirq.Gate):
         all_quregs, out_quregs = _get_all_and_output_quregs_from_input(
             bloq.signature, qubit_manager, in_quregs=cirq_quregs
         )
-        cirq_op = BloqAsCirqGate(bloq=bloq).on(*merge_qubits(bloq.signature, **all_quregs))
+        gate = bloq if isinstance(bloq, cirq.Gate) else BloqAsCirqGate(bloq=bloq)
+        cirq_op = gate.on(*merge_qubits(bloq.signature, **all_quregs))
         return cirq_op, out_quregs
 
     def _num_qubits_(self) -> int:
@@ -163,7 +167,8 @@ class BloqAsCirqGate(cirq.Gate):
         if power == 1:
             return self
         if power == -1:
-            return self.bloq.adjoint()
+            adj = self.bloq.adjoint()
+            return adj if isinstance(adj, cirq.Gate) else BloqAsCirqGate(adj)
 
         from qualtran.bloqs.basic_gates import Power
 

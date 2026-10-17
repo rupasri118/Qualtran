@@ -630,6 +630,9 @@ class Bloq(metaclass=abc.ABCMeta):
         """
         import cirq
 
+        if isinstance(self, cirq.Gate):
+            return cirq.Gate.on(self, *qubits)
+
         from qualtran.cirq_interop import BloqAsCirqGate
 
         return cirq.Gate.on(BloqAsCirqGate(bloq=self), *qubits)

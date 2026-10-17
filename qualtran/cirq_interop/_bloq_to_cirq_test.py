@@ -140,12 +140,23 @@ def test_swap():
 
 
 def test_cirq_pow():
+    from qualtran.bloqs.basic_gates import Power
+
     circ = cirq.Circuit()
     q0, q1 = cirq.LineQubit.range(2)
     with pytest.raises(ValueError, match=r'.*positive integer.*'):
         circ += (BloqAsCirqGate(SwapTwoBitsTest()) ** 0.5).on(q0, q1)
 
     circ += (BloqAsCirqGate(SwapTwoBitsTest()) ** 2).on(q0, q1)
+
+    # Test inverse (__pow__(-1)) returns a cirq.Gate even if bloq.adjoint() is not a cirq.Gate
+    gate_inv = BloqAsCirqGate(SwapTwoBitsTest()) ** -1
+    assert isinstance(gate_inv, cirq.Gate)
+    circ += gate_inv.on(q0, q1)
+
+    # Test wrapping an existing cirq.Gate raises ValueError
+    with pytest.raises(ValueError, match=r'already a cirq.Gate'):
+        _ = BloqAsCirqGate(Power(SwapTwoBitsTest(), 2))
 
 
 def test_multi_and_allocates():
